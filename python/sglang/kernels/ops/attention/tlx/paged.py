@@ -26,7 +26,9 @@ import triton.language as tl
 import utlx_plugin as tlx
 
 
-@triton.jit
+# Batch-dependent sizes stay runtime values: a serving batch changes them every step,
+# and each specialization would compile a new TDM kernel.
+@triton.jit(do_not_specialize=["stride_pb", "total_q"])
 def _paged_gqa(
     Q,
     K,
@@ -47,7 +49,7 @@ def _paged_gqa(
     stride_vh: tl.constexpr,
     stride_ot: tl.constexpr,
     stride_oh: tl.constexpr,
-    stride_pb: tl.constexpr,
+    stride_pb,
     POOL_TOKENS: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -60,7 +62,7 @@ def _paged_gqa(
     HAS_V_SCALE: tl.constexpr,
     COMPUTE_DTYPE: tl.constexpr,
     SPLITS: tl.constexpr,
-    TOTAL_Q: tl.constexpr,
+    total_q,
     Q_HEADS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -257,13 +259,13 @@ def _paged_gqa(
             iteration += 1
         result = acc * v_scale / tl.where(denominator > 0, denominator, 1.0)[:, None]
         if SPLITS > 1:
-            O += split.to(tl.int64) * TOTAL_Q * Q_HEADS * HEAD_DIM
+            O += split.to(tl.int64) * total_q * Q_HEADS * HEAD_DIM
             lse = tl.where(
                 denominator > 0, maximum + tl.log2(denominator), float("-inf")
             )
             tl.store(
                 LSE
-                + split.to(tl.int64) * TOTAL_Q * Q_HEADS
+                + split.to(tl.int64) * total_q * Q_HEADS
                 + (q_begin + q_pos) * Q_HEADS
                 + head,
                 lse,
@@ -279,12 +281,12 @@ def _paged_gqa(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["total_rows"])
 def _merge_splits(
     PARTIAL,
     LSE,
     OUT,
-    TOTAL_ROWS: tl.constexpr,
+    total_rows,
     HEAD_DIM: tl.constexpr,
     SPLITS: tl.constexpr,
     Q_HEADS: tl.constexpr,
@@ -294,14 +296,14 @@ def _merge_splits(
     row = tl.program_id(0)
     splits = tl.arange(0, SPLITS)
     dims = tl.arange(0, HEAD_DIM)
-    lse = tl.load(LSE + splits * TOTAL_ROWS + row)
+    lse = tl.load(LSE + splits.to(tl.int64) * total_rows + row)
     largest = tl.max(lse, 0)
     largest = tl.where(largest == float("-inf"), 0.0, largest)
     weight = tl.exp2(lse - largest)
     total = tl.sum(weight, 0)
     partial = tl.load(
         PARTIAL
-        + (splits[:, None].to(tl.int64) * TOTAL_ROWS + row) * HEAD_DIM
+        + (splits[:, None].to(tl.int64) * total_rows + row) * HEAD_DIM
         + dims[None, :]
     )
     value = tl.sum(partial * weight[:, None], 0) / tl.where(total > 0, total, 1.0)
