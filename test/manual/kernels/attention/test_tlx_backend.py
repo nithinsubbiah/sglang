@@ -1,5 +1,6 @@
 """GPU tests through SGLang forward_extend/forward_decode, without model weights."""
 
+import inspect
 import unittest
 
 import torch
@@ -48,13 +49,28 @@ class TestTlxBackend(CustomTestCase):
         )
         backend = object.__new__(TlxAttnBackend)
         backend._tlx_attention = unified_attention
+        backend._tlx_parameters = frozenset(
+            inspect.signature(unified_attention).parameters
+        )
         backend._tlx_unsupported_reason = unsupported_reason
         backend._tlx_fallback_reasons = set()
+        backend._tlx_dispatched = set()
         backend.use_mla = False
         backend.use_triton_unified_attention = True
         backend._use_unified_verify = True
         backend.use_sliding_window_kv_pool = False
         backend.kv_cache_is_vectorized_5d = False
+        # AiterAttnBackend's Muse fast paths are gfx95-only, so gfx1250 runs them disabled.
+        backend.use_muse_attention_paths = False
+        backend.use_muse_flydsl_decode = False
+        backend._muse_ck_block_prefill = False
+        backend.muse_reuse_extend_metadata = False
+        backend.muse_reuse_verify_lengths = False
+        backend.muse_extend_fp8_q = False
+        backend.muse_extend_gluon = False
+        backend._muse_extend_fp8_logged = False
+        backend.muse_verify_kernels = frozenset()
+        backend.muse_unified_attention_kwargs = {}
         backend.dcp_world_size = 1
         backend.kv_cache_dtype = args["k"].dtype
         backend.input_dtype = args["out"].dtype

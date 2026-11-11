@@ -13,6 +13,7 @@
 
 """Opt-in gfx1250 uTLX attention using AITER's cache and metadata lifecycle."""
 
+import inspect
 import logging
 
 import torch
@@ -37,15 +38,48 @@ class TlxAttnBackend(AiterAttnBackend):
         )
 
         self._tlx_attention = unified_attention
+        self._tlx_parameters = frozenset(
+            inspect.signature(unified_attention).parameters
+        )
         self._tlx_unsupported_reason = unsupported_reason
         self._tlx_fallback_reasons = set()
+        self._tlx_dispatched = set()
         super().__init__(model_runner, force_unified_attention=True, **kwargs)
 
     def _run_unified_attention(self, **kwargs):
-        reason = self._tlx_unsupported_reason(**kwargs)
+        # AITER-only tuning arguments have no uTLX equivalent; keep AITER for them.
+        extra = sorted(kwargs.keys() - self._tlx_parameters)
+        reason = (
+            f"AITER-only arguments {extra}"
+            if extra
+            else self._tlx_unsupported_reason(**kwargs)
+        )
         if reason is None:
+            self._log_dispatch(kwargs)
             return self._tlx_attention(**kwargs)
         if reason not in self._tlx_fallback_reasons:
-            logger.debug("uTLX attention falls back to AITER: %s", reason)
+            logger.info("uTLX attention falls back to AITER: %s", reason)
             self._tlx_fallback_reasons.add(reason)
         return super()._run_unified_attention(**kwargs)
+
+    def _log_dispatch(self, kwargs):
+        # Host-side metadata only; under graph capture this runs once per captured shape.
+        key = (
+            kwargs["max_seqlen_q"],
+            tuple(kwargs["window_size"]),
+            kwargs["q"].dtype,
+            kwargs["k"].dtype,
+            kwargs["q"].shape[1:],
+            kwargs["k"].shape[1:],
+        )
+        if key not in self._tlx_dispatched:
+            self._tlx_dispatched.add(key)
+            logger.info(
+                "uTLX attention: max_seqlen_q=%d window=%s q=%s%s kv=%s%s",
+                key[0],
+                key[1],
+                key[2],
+                tuple(key[4]),
+                key[3],
+                tuple(key[5]),
+            )
