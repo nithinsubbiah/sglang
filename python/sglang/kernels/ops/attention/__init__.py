@@ -74,6 +74,22 @@ for _mod, _fn in _TRITON_KERNELS:
     )
 del _mod, _fn
 
+# uTLX is optional. Keep the plugin and GPU implementation out of group imports;
+# the entry points additionally enforce gfx1250 and their shape/dtype contracts.
+for _name, _target in (
+    ("tlx_dense_attention", "tlx.gfx1250:flash_attn"),
+    ("tlx_paged_attention", "tlx.paged:unified_attention"),
+):
+    register_kernel(
+        KernelSpec(
+            op=f"attention.{_name}",
+            backend=KernelBackend.TRITON,
+            target=f"sglang.kernels.ops.attention.{_target}",
+            capabilities=frozenset({CapabilityRequirement.HIP}),
+        )
+    )
+del _name, _target
+
 register_kernel(
     KernelSpec(
         op="attention.qk_norm_rope",

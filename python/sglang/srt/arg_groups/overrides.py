@@ -1501,7 +1501,7 @@ def _hybrid_swa_memory_backend_disable(view: Any) -> dict:
     backends = [
         backend
         for backend in attention_backends_of(view)
-        if backend in ("aiter", "wave", "flex_attention")
+        if backend in ("aiter", "tlx", "wave", "flex_attention")
     ]
     if not backends:
         return {}
