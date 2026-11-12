@@ -421,14 +421,28 @@ def unsupported_reason(
 
 def _launch_config(q, k, batch, max_seqlen_q, max_seqlen_k, window_left):
     group = q.shape[1] // k.shape[2]
+    units = torch.cuda.get_device_properties(q.device).multi_processor_count
+    # Short queries retain the page-sized tile so split-KV stays lightweight.
+    block_n = k.shape[1]
+    long_d64_gqa8 = max_seqlen_q >= 1024 and q.shape[-1] == 64 and group == 8
     if max_seqlen_q == 1 and q.shape[-1] == 64:
         block_m, num_warps = 16, 1
     elif max_seqlen_q <= 8:
         block_m, num_warps = 32, 2
+    elif (
+        long_d64_gqa8
+        and window_left < 0
+        and batch * k.shape[2] * triton.cdiv(max_seqlen_q, 256 // group) >= 2 * units
+    ):
+        # Every tile streams the whole prefix, so taller tiles cut KV traffic. They
+        # need eight warps (four spill registers) and enough tiles to fill the GPU.
+        block_m, block_n, num_warps = 256, max(block_n, 64), 8
     else:
         block_m, num_warps = (64 if max_seqlen_q >= 1024 else 128), 4
+        if long_d64_gqa8:
+            # Two-page tiles amortize TDM waits for long D64 GQA prefill.
+            block_n = max(block_n, 32)
     programs = batch * k.shape[2] * triton.cdiv(max_seqlen_q, block_m // group)
-    units = torch.cuda.get_device_properties(q.device).multi_processor_count
     active_k = (
         min(max_seqlen_k, window_left + max_seqlen_q + 1)
         if window_left >= 0
@@ -445,7 +459,7 @@ def _launch_config(q, k, batch, max_seqlen_q, max_seqlen_k, window_left):
             triton.next_power_of_2(triton.cdiv(target_programs, programs)),
             triton.next_power_of_2(max(1, active_k // min_segment)),
         )
-    return block_m, splits, num_warps
+    return block_m, block_n, splits, num_warps
 
 
 def unified_attention(
@@ -482,14 +496,9 @@ def unified_attention(
     if q.shape[0] == 0 or max_seqlen_q == 0 or seqused_k.numel() == 0:
         return out
     group = q.shape[1] // k.shape[2]
-    block_m, splits, num_warps = _launch_config(
+    block_m, block_n, splits, num_warps = _launch_config(
         q, k, seqused_k.numel(), max_seqlen_q, max_seqlen_k, window_size[0]
     )
-    # Two-page tiles amortize TDM waits for long D64 GQA prefill. Short
-    # queries retain the smaller tile so split-KV stays lightweight.
-    block_n = k.shape[1]
-    if max_seqlen_q >= 1024 and q.shape[-1] == 64 and group == 8:
-        block_n = max(block_n, 32)
     query_tiles = triton.cdiv(max_seqlen_q, block_m // group)
     grid = (seqused_k.numel(), k.shape[2], query_tiles * splits)
     partial = (
